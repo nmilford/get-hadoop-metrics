@@ -1,0 +1,112 @@
+#!/usr/bin/env ruby
+# Copyright 2013, Nathan Milford
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Make sure you have the /metrics URL context exposed by your Hadoop daemons.
+# Drop me in cron on your hadoop nodes.
+#
+# * For your namenode   'get-hadoop-metrics -t nn -d graphite.example.com
+# * For your jobtracker 'get-hadoop-metrics -t jt -d graphite.example.com
+# * For your slaves     'get-hadoop-metrics -t dn,tt -d graphite.example.com
+
+require 'rubygems'
+require 'open-uri'
+require 'optparse'
+require "socket"
+
+options = {}
+options[:host] = "localhost"
+options[:dest] = "localhost"
+options[:port] = 2003
+
+metric_types = {
+  "nn" => { "name" => "namenode",    "port" => 50070 },
+  "jt" => { "name" => "jobtracker",  "port" => 50030 },
+  "dn" => { "name" => "datanode",    "port" => 50075 },
+  "tt" => { "name" => "tasktracker", "port" => 50060 }
+}
+
+def get_metrics(host, port)
+  metrics = {}
+  data = open("http://#{host}:#{port}/metrics").string.split("\n")
+  data.delete_if { |x| x.include?("hostName") }
+  data.delete_if { |x| ! x.include?("=") }
+  data.each do |metric|
+    metrics[metric.split('=')[0].strip] = metric.split('=')[1].strip.to_f
+  end
+  return metrics
+end
+
+def submit_metrics(path, metrics, name, dest, port)
+  metrics.each do |metric, val|
+    time = Time.now
+    payload = "#{path}.#{name}.#{metric} #{val} #{time.to_i}\n"
+    s = TCPSocket.new(dest,port)
+    s.write(payload)
+    s.close
+  end
+end
+
+def make_path(host)
+  if host == "localhost"
+    hostname = `hostname -s`.chomp
+  else
+    hostname = host.split(".")[0]
+  end
+
+  # You can put logic here to add more hierarchy to the metric path. For
+  # example we have the data center ID as part of the FQDN: host.ny.example.com
+  #
+  # dc = hostname.split("-")[3]
+  # return "hadoop.#{dc}.#{hostname}"
+
+  return "hadoop.#{hostname}"
+end
+
+optparse = OptionParser.new do |opts|
+  opts.on( '-?', '--help', 'Display this screen.' ) do
+    puts opts
+    exit 1
+  end
+  opts.on( '-t', '--type nn,jt,dn,tt', "Type of metrics to collect, can be multiple comma separated values." ) do |t|
+    options[:type] = t
+  end
+  opts.on( '-h', '--host HOSTNAME', "Host to collect from, optional, defaults to localhost if not specified. [optional]" ) do |h|
+    options[:host] = h
+  end
+  opts.on( '-d', '--destination GRAPHITE_HOST', "The graphite host to emit metrics to, defaults to localhost if not specified. [optional]" ) do |d|
+    options[:dest] = d
+  end
+  opts.on( '-p', '--port GRAPHITE_PORT', "The graphite port to emit metrics to, defaults to 2003 if not specified. [optional]" ) do |p|
+    options[:port] = p
+  end
+end
+
+optparse.parse!
+
+unless options[:type]
+  puts "Please specify one or more (comma separated) metric types to collect. See -? for help."
+  exit 1
+else
+  options[:type].split(",").each do |type|
+    if ! metric_types.include?(type)
+      puts "#{type} is not a valid metric type to collect."
+      exit 1
+    else
+      metrics = get_metrics(options[:host], metric_types[type]["port"])
+      path = make_path(options[:host])
+      submit_metrics(path, metrics, metric_types[type]["name"], options[:dest], options[:port])
+    end
+  end
+end
